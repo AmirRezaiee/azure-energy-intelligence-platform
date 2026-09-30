@@ -216,3 +216,10 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+# Azure Energy Intelligence Platform
+# Local raw API data
+/data/raw/
+
+# Local secrets and credentials
+.env.*
+!.env.example
