@@ -2,7 +2,7 @@
 
 An end-to-end Azure Data Engineering project that ingests U.S. electricity demand and demand forecast data from the U.S. Energy Information Administration (EIA), stores raw data in Azure Data Lake Storage Gen2, and transforms it through an incremental Bronze-Silver-Gold architecture in Azure Databricks.
 
-The project is designed around production-oriented data engineering concepts including incremental ingestion, historical revision handling, idempotent processing, Delta Lake MERGE operations, data quality validation, and medallion architecture.
+The project is designed around production-oriented data engineering concepts including incremental ingestion, historical revision handling, idempotent processing, Delta Lake MERGE operations, data quality validation, medallion architecture, workflow orchestration, and version-controlled Databricks deployment configuration.
 
 ---
 
@@ -24,6 +24,8 @@ The pipeline:
 6. Produces clean hourly demand and forecast records in Silver.
 7. Generates daily analytical KPIs in Gold.
 8. Uses idempotent MERGE logic so the pipeline can be safely rerun.
+9. Orchestrates Bronze, Silver, and Gold through a dependency-aware Databricks Job.
+10. Manages the Databricks workflow definition through Databricks Asset Bundles and Git.
 
 ---
 
@@ -34,7 +36,7 @@ U.S. Energy Information Administration (EIA)
                     |
                     | REST API
                     v
-          Python Ingestion Pipeline
+           Python Ingestion Pipeline
                     |
                     | Validation
                     | Pagination
@@ -42,30 +44,45 @@ U.S. Energy Information Administration (EIA)
                     | Watermarking
                     | Revision Detection
                     v
-        Azure Data Lake Storage Gen2
+         Azure Data Lake Storage Gen2
                     |
                     | Raw JSON
                     | Partitioned by date
                     | Canonical + revision files
                     v
-             Azure Databricks
+              Azure Databricks
                     |
-          +---------+---------+
-          |                   |
-          v                   |
-     Bronze History           |
-          |                   |
-          v                   |
-     Bronze Latest <----------+
-          |
-          v
-        Silver
-  Hourly Demand + Forecast
-          |
-          v
-         Gold
-     Daily Energy KPIs
+              Bronze History
+                    |
+                    v
+              Bronze Latest
+                    |
+                    v
+                 Silver
+          Hourly Demand + Forecast
+                    |
+                    v
+                  Gold
+             Daily Energy KPIs
 ```
+
+The Databricks transformation workflow is orchestrated as:
+
+```text
+Bronze
+   |
+   | ALL_SUCCESS
+   v
+Silver
+   |
+   | ALL_SUCCESS
+   v
+Gold
+```
+
+The workflow configuration is version-controlled through Databricks Asset Bundles.
+
+---
 
 ### Technology Stack
 
@@ -76,6 +93,8 @@ U.S. Energy Information Administration (EIA)
 - Azure Identity
 - Azure Storage SDK
 - Azure Databricks
+- Databricks Jobs / Workflows
+- Databricks Asset Bundles
 - Apache Spark / PySpark
 - Delta Lake
 - Databricks Unity Catalog
@@ -466,11 +485,11 @@ Absolute Error  : 6,338 MWh
 The revised daily Gold KPI for September 26 included:
 
 ```text
-Hour Count              : 24
-Average Hourly Demand    : 458,994.33 MWh
-Peak Demand              : 539,672 MWh
-Total Daily Energy       : 11,015,864 MWh
-Mean Absolute Error      : 3,130.375 MWh
+Hour Count           : 24
+Average Hourly Demand : 458,994.33 MWh
+Peak Demand           : 539,672 MWh
+Total Daily Energy    : 11,015,864 MWh
+Mean Absolute Error   : 3,130.375 MWh
 ```
 
 This demonstrates that a historical source revision can propagate from raw storage through Bronze, Silver, and Gold without creating duplicate analytical records.
@@ -481,29 +500,44 @@ This demonstrates that a historical source revision can propagate from raw stora
 
 ```text
 azure-energy-intelligence-platform/
-│
+|
+├── databricks.yml
+|
+├── databricks/
+|   └── resources/
+|       └── energy_eia_medallion_job.yml
+|
 ├── notebooks/
-│   ├── 01_incremental_bronze_eia.py
-│   ├── 02_incremental_silver_eia.py
-│   └── 03_incremental_gold_eia.py
-│
+|   ├── 01_incremental_bronze_eia.py
+|   ├── 02_incremental_silver_eia.py
+|   └── 03_incremental_gold_eia.py
+|
 ├── src/
-│   └── ingestion/
-│       ├── compare_adls_files.py
-│       ├── eia_api_client.py
-│       ├── eia_to_adls_pipeline.py
-│       └── upload_eia_revision.py
-│
+|   └── ingestion/
+|       ├── compare_adls_files.py
+|       ├── eia_api_client.py
+|       ├── eia_to_adls_pipeline.py
+|       └── upload_eia_revision.py
+|
 ├── data/
-│   ├── raw/
-│   └── state/
-│
+|   ├── raw/
+|   └── state/
+|
 ├── .gitignore
 ├── requirements.txt
 └── README.md
 ```
 
 Local raw data, pipeline state, virtual environments, and secrets are excluded from Git.
+
+The Databricks workflow configuration is stored in:
+
+```text
+databricks.yml
+databricks/resources/energy_eia_medallion_job.yml
+```
+
+This keeps workflow configuration version-controlled alongside the transformation code.
 
 ---
 
@@ -548,6 +582,8 @@ Remove-Variable secureKey
 ```
 
 This keeps the API key out of source code and shell history.
+
+Databricks CLI authentication is used for Asset Bundle validation and deployment. Databricks access credentials are not stored in the repository.
 
 ---
 
@@ -658,11 +694,11 @@ The Databricks Job contains three tasks:
 ```text
 bronze_eia_incremental
         |
-        | All succeeded
+        | ALL_SUCCESS
         v
 silver_eia_incremental
         |
-        | All succeeded
+        | ALL_SUCCESS
         v
 gold_eia_daily_kpi
 ```
@@ -692,6 +728,77 @@ The EIA API ingestion process remains a separate local Python pipeline. The Data
 
 ---
 
+## Databricks Job-as-Code
+
+The Databricks transformation workflow is managed as code using Databricks Asset Bundles.
+
+The root Bundle configuration is:
+
+```text
+databricks.yml
+```
+
+The Job resource definition is stored in:
+
+```text
+databricks/resources/energy_eia_medallion_job.yml
+```
+
+The Bundle defines:
+
+- the Databricks workspace target
+- the existing development compute configuration
+- the `energy-eia-medallion-pipeline` Job
+- Bronze, Silver, and Gold tasks
+- task dependencies
+- `ALL_SUCCESS` execution requirements
+- queue configuration
+- concurrency configuration
+- workflow performance configuration
+
+The Job resource follows this dependency graph:
+
+```text
+bronze_eia_incremental
+        |
+        v
+silver_eia_incremental
+        |
+        v
+gold_eia_daily_kpi
+```
+
+The Bundle configuration was validated using the Databricks CLI before deployment.
+
+```bash
+databricks bundle validate -t dev
+```
+
+The existing Databricks Job was bound to the Bundle rather than creating a duplicate Job.
+
+After binding, the Bundle was deployed successfully and updated the existing workflow resource.
+
+```text
+Resources:
+0 created
+1 changed
+0 deleted
+```
+
+The deployed Job is now Bundle-managed, making Git the version-controlled source for workflow configuration changes.
+
+This improves:
+
+- reproducibility
+- change tracking
+- deployment consistency
+- workflow configuration review
+- future CI/CD integration
+
+The current Job still references the existing Databricks workspace notebooks and development compute. Future iterations can further decouple deployment from user-specific workspace resources.
+
+---
+
 ## Engineering Concepts Demonstrated
 
 This project demonstrates practical implementation of:
@@ -713,6 +820,10 @@ This project demonstrates practical implementation of:
 - Data lineage
 - Forecast accuracy analytics
 - Azure authentication
+- Databricks workflow orchestration
+- Task dependency management
+- Databricks Asset Bundles
+- Workflow configuration as code
 - Git-based source control
 
 ---
@@ -729,6 +840,11 @@ The project currently uses:
 - Azure Databricks for transformation
 - Unity Catalog for Bronze, Silver, and Gold Delta tables
 - Delta Lake for incremental analytical processing
+- Databricks Jobs for Bronze-Silver-Gold orchestration
+- Databricks Asset Bundles for version-controlled workflow configuration
+- Git and GitHub for source control
+
+The transformation workflow is currently manually triggered. Automated scheduling is intentionally left as a future enhancement.
 
 ---
 
@@ -772,6 +888,18 @@ Gold therefore requires exactly 24 hourly Silver records for each daily KPI.
 
 Bronze, Silver, and Gold use Delta Lake MERGE operations so rerunning the same data does not create duplicate business records.
 
+### Dependency-Aware Workflow Execution
+
+Silver runs only after Bronze succeeds, and Gold runs only after Silver succeeds.
+
+This prevents downstream layers from processing when an upstream transformation has failed.
+
+### Workflow Configuration as Code
+
+The Databricks Job definition is stored in the repository using Databricks Asset Bundles.
+
+This reduces configuration drift between source control and the deployed workflow and creates a foundation for future CI/CD deployment.
+
 ---
 
 ## Future Enhancements
@@ -780,13 +908,15 @@ Planned improvements include:
 
 - cloud-hosted pipeline checkpointing
 - managed identity authentication
-- automated scheduling
+- automated workflow scheduling
 - configurable rolling revision windows
 - explicit ingestion and revision timestamps
 - automated unit and integration testing
 - pipeline monitoring and alerting
 - CI/CD with GitHub Actions
-- infrastructure as code
+- broader infrastructure as code for Azure resources
+- bundle-managed deployment of transformation notebooks
+- environment-specific Databricks deployment targets
 - analytical dashboarding
 - support for additional EIA respondents
 - support for additional EIA datasets
@@ -805,6 +935,8 @@ The architecture emphasizes:
 - incremental processing
 - data quality
 - idempotency
+- orchestration
+- version-controlled deployment configuration
 - analytics-ready modeling
 
-The project is intended to demonstrate practical Azure Data Engineering skills using Python, ADLS Gen2, Azure Databricks, Apache Spark, Delta Lake, and Git.
+The project is intended to demonstrate practical Azure Data Engineering skills using Python, ADLS Gen2, Azure Databricks, Apache Spark, Delta Lake, Databricks Jobs, Databricks Asset Bundles, and Git.
