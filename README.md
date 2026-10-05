@@ -625,17 +625,51 @@ EIA API
 
 ---
 
-## Databricks Processing Order
+## Databricks Workflow Orchestration
 
-Run the notebooks in the following order:
+The medallion transformation pipeline is orchestrated using an Azure Databricks Job named:
 
 ```text
-1. 01_incremental_bronze_eia.py
-2. 02_incremental_silver_eia.py
-3. 03_incremental_gold_eia.py
+energy-eia-medallion-pipeline
 ```
 
-Data flows through:
+The workflow executes the three incremental transformation notebooks in dependency order:
+
+```text
+01_incremental_bronze_eia
+          |
+          v
+02_incremental_silver_eia
+          |
+          v
+03_incremental_gold_eia
+```
+
+The corresponding repository notebooks are:
+
+```text
+notebooks/01_incremental_bronze_eia.py
+notebooks/02_incremental_silver_eia.py
+notebooks/03_incremental_gold_eia.py
+```
+
+The Databricks Job contains three tasks:
+
+```text
+bronze_eia_incremental
+        |
+        | All succeeded
+        v
+silver_eia_incremental
+        |
+        | All succeeded
+        v
+gold_eia_daily_kpi
+```
+
+Each downstream task runs only after its upstream dependency succeeds.
+
+The workflow therefore enforces the transformation sequence:
 
 ```text
 ADLS Raw
@@ -650,20 +684,11 @@ Silver Hourly Analytics
 Gold Daily KPIs
 ```
 
----
+The workflow was successfully validated with an end-to-end Databricks Job run in which all three tasks completed successfully.
 
-## Delta Lake Business Keys
+The current workflow uses the project's single-node Databricks compute configuration for controlled development and testing.
 
-The pipeline uses explicit business keys at each analytical layer.
-
-| Layer | Business Key |
-|---|---|
-| Bronze History | Source version + `(period, respondent, type)` |
-| Bronze Latest | `(period, respondent, type)` |
-| Silver | `(period, respondent)` |
-| Gold | `(date, respondent)` |
-
-These keys support deterministic incremental processing and duplicate prevention.
+The EIA API ingestion process remains a separate local Python pipeline. The Databricks Job currently orchestrates the Bronze, Silver, and Gold transformation layers after raw data has been stored in ADLS Gen2.
 
 ---
 
@@ -755,7 +780,6 @@ Planned improvements include:
 
 - cloud-hosted pipeline checkpointing
 - managed identity authentication
-- Databricks Jobs / Workflows orchestration
 - automated scheduling
 - configurable rolling revision windows
 - explicit ingestion and revision timestamps
