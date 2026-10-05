@@ -1,0 +1,52 @@
+resources:
+  jobs:
+    energy_eia_medallion_pipeline:
+      name: energy-eia-medallion-pipeline
+
+      max_concurrent_runs: 1
+      performance_target: PERFORMANCE_OPTIMIZED
+
+      queue:
+        enabled: true
+
+      email_notifications:
+        no_alert_for_skipped_runs: false
+
+      tasks:
+        - task_key: bronze_eia_incremental
+          run_if: ALL_SUCCESS
+          timeout_seconds: 0
+
+          notebook_task:
+            notebook_path: /Workspace/Users/adarsara3@gatech.edu/01_incremental_bronze_eia
+            source: WORKSPACE
+
+          existing_cluster_id: ${var.existing_cluster_id}
+
+        - task_key: silver_eia_incremental
+          depends_on:
+            - task_key: bronze_eia_incremental
+
+          run_if: ALL_SUCCESS
+          timeout_seconds: 0
+
+          notebook_task:
+            notebook_path: /Workspace/Users/adarsara3@gatech.edu/02_incremental_silver_eia
+            source: WORKSPACE
+
+          existing_cluster_id: ${var.existing_cluster_id}
+
+        - task_key: gold_eia_daily_kpi
+          depends_on:
+            - task_key: silver_eia_incremental
+
+          run_if: ALL_SUCCESS
+          timeout_seconds: 0
+
+          notebook_task:
+            notebook_path: /Workspace/Users/adarsara3@gatech.edu/03_incremental_gold_eia
+            source: WORKSPACE
+
+          existing_cluster_id: ${var.existing_cluster_id}
+
+      timeout_seconds: 0

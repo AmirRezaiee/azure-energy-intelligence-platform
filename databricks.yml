@@ -1,0 +1,23 @@
+bundle:
+  name: azure-energy-intelligence-platform
+
+include:
+  - databricks/resources/*.yml
+
+sync:
+  include:
+    - notebooks/*.py
+
+variables:
+  existing_cluster_id:
+    description: Existing Databricks cluster used for development workflow execution
+
+targets:
+  dev:
+    default: true
+
+    workspace:
+      host: https://adb-7405605707201775.15.azuredatabricks.net
+
+    variables:
+      existing_cluster_id: "0930-180833-mjlmovqa"
