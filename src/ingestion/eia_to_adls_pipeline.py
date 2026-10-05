@@ -1,4 +1,3 @@
-
 import os
 import json
 import time
@@ -30,8 +29,18 @@ RESPONDENT = "US48"
 
 INITIAL_DATE = "2026-09-26"
 
-STATE_FILE = Path(
+# Local state is retained only for one-time migration/bootstrap
+# and local visibility. Cloud state becomes the source of truth.
+LOCAL_STATE_FILE = Path(
     "data/state/eia_us48_adls_watermark.json"
+)
+
+CLOUD_STATE_PATH = (
+    "_pipeline_state/"
+    "eia/"
+    "region-data/"
+    f"{RESPONDENT}/"
+    "watermark.json"
 )
 
 LOCAL_DIR = Path("data/raw/daily")
@@ -120,24 +129,371 @@ def records_are_equal(first, second):
 
 
 # =====================================================
-# WATERMARK
+# LOCAL WATERMARK
 # =====================================================
 
-def load_watermark():
-    if not STATE_FILE.exists():
+def load_local_watermark_payload():
+    """
+    Local watermark is used only to bootstrap the
+    cloud watermark when the cloud state does not
+    exist yet.
+    """
+
+    if not LOCAL_STATE_FILE.exists():
         return None
 
-    with STATE_FILE.open(
+    with LOCAL_STATE_FILE.open(
         "r",
         encoding="utf-8"
     ) as file:
-        return json.load(file)[
-            "last_uploaded_hour"
+        payload = json.load(file)
+
+    validate_watermark_payload(payload)
+
+    return payload
+
+
+def save_local_watermark_copy(payload):
+    """
+    Keep a local copy for development visibility.
+
+    The local file is not the source of truth after
+    cloud watermark initialization.
+    """
+
+    save_json_atomic(
+        LOCAL_STATE_FILE,
+        payload
+    )
+
+
+# =====================================================
+# WATERMARK VALIDATION
+# =====================================================
+
+def validate_watermark_payload(payload):
+    if not isinstance(payload, dict):
+        raise ValueError(
+            "Watermark payload must be a JSON object."
+        )
+
+    last_uploaded_hour = payload.get(
+        "last_uploaded_hour"
+    )
+
+    if not last_uploaded_hour:
+        raise ValueError(
+            "Watermark is missing last_uploaded_hour."
+        )
+
+    try:
+        parsed = datetime.strptime(
+            last_uploaded_hour,
+            HOUR_FORMAT
+        )
+    except ValueError as exc:
+        raise ValueError(
+            "Invalid watermark hour format."
+        ) from exc
+
+    if parsed.hour != 23:
+        raise ValueError(
+            "Watermark must represent a complete day "
+            "ending at hour 23."
+        )
+
+
+# =====================================================
+# AZURE STORAGE
+# =====================================================
+
+def create_filesystem():
+    credential = AzureCliCredential()
+
+    service = DataLakeServiceClient(
+        account_url=(
+            f"https://{STORAGE_ACCOUNT}"
+            ".dfs.core.windows.net"
+        ),
+        credential=credential
+    )
+
+    return service.get_file_system_client(
+        CONTAINER
+    )
+
+
+def ensure_directories(filesystem, path):
+    parent = path.rsplit("/", 1)[0]
+    current = ""
+
+    for part in parent.split("/"):
+        current = (
+            f"{current}/{part}"
+            if current
+            else part
+        )
+
+        directory = (
+            filesystem.get_directory_client(
+                current
+            )
+        )
+
+        if not directory.exists():
+            directory.create_directory()
+
+
+def upload_new_file(filesystem, path, data):
+    """
+    Create, append, flush and verify.
+
+    Never automatically overwrite an
+    existing immutable data file.
+    """
+
+    ensure_directories(
+        filesystem,
+        path
+    )
+
+    remote = filesystem.get_file_client(
+        path
+    )
+
+    if remote.exists():
+        existing = (
+            remote.download_file().readall()
+        )
+
+        if sha256(existing) == sha256(data):
+            print(
+                "Identical file already exists. "
+                "Upload skipped."
+            )
+            return
+
+        raise FileExistsError(
+            "Destination already exists "
+            "with different content."
+        )
+
+    remote.create_file()
+
+    offset = 0
+
+    for position in range(
+        0,
+        len(data),
+        CHUNK_SIZE
+    ):
+        chunk = data[
+            position:position + CHUNK_SIZE
         ]
 
+        remote.append_data(
+            data=chunk,
+            offset=offset,
+            length=len(chunk)
+        )
 
-def calculate_start_date():
-    watermark = load_watermark()
+        offset += len(chunk)
+
+    remote.flush_data(offset)
+
+    uploaded = (
+        remote.download_file().readall()
+    )
+
+    if sha256(uploaded) != sha256(data):
+        raise ValueError(
+            "Azure checksum verification failed."
+        )
+
+    print(
+        f"Upload verified: {len(data)} bytes"
+    )
+
+
+def write_cloud_state_file(filesystem, path, data):
+    """
+    Write mutable pipeline state to ADLS.
+
+    Unlike immutable raw data files, the watermark
+    is intentionally replaced as the pipeline
+    successfully advances.
+
+    The uploaded bytes are read back and verified
+    before the state update is considered successful.
+    """
+
+    ensure_directories(
+        filesystem,
+        path
+    )
+
+    remote = filesystem.get_file_client(
+        path
+    )
+
+    remote.create_file()
+
+    offset = 0
+
+    for position in range(
+        0,
+        len(data),
+        CHUNK_SIZE
+    ):
+        chunk = data[
+            position:position + CHUNK_SIZE
+        ]
+
+        remote.append_data(
+            data=chunk,
+            offset=offset,
+            length=len(chunk)
+        )
+
+        offset += len(chunk)
+
+    remote.flush_data(offset)
+
+    uploaded = (
+        remote.download_file().readall()
+    )
+
+    if sha256(uploaded) != sha256(data):
+        raise ValueError(
+            "Cloud watermark checksum "
+            "verification failed."
+        )
+
+
+# =====================================================
+# CLOUD WATERMARK
+# =====================================================
+
+def load_cloud_watermark_payload(filesystem):
+    remote = filesystem.get_file_client(
+        CLOUD_STATE_PATH
+    )
+
+    if not remote.exists():
+        return None
+
+    raw = remote.download_file().readall()
+
+    try:
+        payload = json.loads(
+            raw.decode("utf-8")
+        )
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise ValueError(
+            "Cloud watermark is not valid JSON. "
+            "Manual inspection required."
+        ) from exc
+
+    validate_watermark_payload(payload)
+
+    return payload
+
+
+def initialize_cloud_watermark(filesystem):
+    """
+    Establish ADLS as the source of truth.
+
+    If cloud state already exists, use it.
+
+    If cloud state does not exist but the previous
+    local watermark exists, migrate that state to
+    ADLS exactly once.
+
+    If neither exists, the pipeline starts from
+    INITIAL_DATE and creates cloud state only after
+    the first successfully processed day.
+    """
+
+    cloud_payload = load_cloud_watermark_payload(
+        filesystem
+    )
+
+    if cloud_payload is not None:
+        print(
+            "Cloud watermark found: "
+            f"{cloud_payload['last_uploaded_hour']}"
+        )
+
+        save_local_watermark_copy(
+            cloud_payload
+        )
+
+        return cloud_payload
+
+    print(
+        "Cloud watermark not found."
+    )
+
+    local_payload = load_local_watermark_payload()
+
+    if local_payload is None:
+        print(
+            "Local watermark not found. "
+            "Pipeline will start from INITIAL_DATE."
+        )
+        return None
+
+    print(
+        "Bootstrapping cloud watermark from "
+        "existing local state: "
+        f"{local_payload['last_uploaded_hour']}"
+    )
+
+    data = serialize_payload(
+        local_payload
+    )
+
+    write_cloud_state_file(
+        filesystem,
+        CLOUD_STATE_PATH,
+        data
+    )
+
+    verified = load_cloud_watermark_payload(
+        filesystem
+    )
+
+    if (
+        verified["last_uploaded_hour"]
+        != local_payload["last_uploaded_hour"]
+    ):
+        raise ValueError(
+            "Cloud watermark bootstrap "
+            "verification failed."
+        )
+
+    print(
+        "Cloud watermark bootstrap: VERIFIED"
+    )
+
+    return verified
+
+
+def load_watermark(filesystem):
+    payload = load_cloud_watermark_payload(
+        filesystem
+    )
+
+    if payload is None:
+        return None
+
+    return payload["last_uploaded_hour"]
+
+
+def calculate_start_date(filesystem):
+    watermark = load_watermark(
+        filesystem
+    )
 
     if watermark is None:
         return datetime.strptime(
@@ -167,10 +523,20 @@ def calculate_start_date():
     )
 
 
-def save_watermark(day):
+def save_watermark(filesystem, day):
+    """
+    Advance cloud checkpoint monotonically.
+
+    Cloud state is the source of truth.
+    A local copy is updated only after the cloud
+    write has been successfully verified.
+    """
+
     new_hour = f"{day.isoformat()}T23"
 
-    previous = load_watermark()
+    previous = load_watermark(
+        filesystem
+    )
 
     if previous is not None:
         new_hour = max(
@@ -178,17 +544,43 @@ def save_watermark(day):
             new_hour
         )
 
-    save_json_atomic(
-        STATE_FILE,
-        {
-            "last_uploaded_hour": new_hour,
-            "updated_at_utc": (
-                datetime.now(
-                    timezone.utc
-                ).isoformat()
-            )
-        }
+    payload = {
+        "last_uploaded_hour": new_hour,
+        "updated_at_utc": (
+            datetime.now(
+                timezone.utc
+            ).isoformat()
+        )
+    }
+
+    data = serialize_payload(
+        payload
     )
+
+    write_cloud_state_file(
+        filesystem,
+        CLOUD_STATE_PATH,
+        data
+    )
+
+    verified = load_cloud_watermark_payload(
+        filesystem
+    )
+
+    if (
+        verified["last_uploaded_hour"]
+        != new_hour
+    ):
+        raise ValueError(
+            "Cloud watermark verification failed."
+        )
+
+    # Local copy is informational only.
+    save_local_watermark_copy(
+        verified
+    )
+
+    return new_hour
 
 
 # =====================================================
@@ -338,116 +730,8 @@ def validate_day(records, day):
 
 
 # =====================================================
-# AZURE STORAGE
+# RAW ADLS PROCESSING
 # =====================================================
-
-def create_filesystem():
-    credential = AzureCliCredential()
-
-    service = DataLakeServiceClient(
-        account_url=(
-            f"https://{STORAGE_ACCOUNT}"
-            ".dfs.core.windows.net"
-        ),
-        credential=credential
-    )
-
-    return service.get_file_system_client(
-        CONTAINER
-    )
-
-
-def ensure_directories(filesystem, path):
-    parent = path.rsplit("/", 1)[0]
-    current = ""
-
-    for part in parent.split("/"):
-        current = (
-            f"{current}/{part}"
-            if current
-            else part
-        )
-
-        directory = (
-            filesystem.get_directory_client(
-                current
-            )
-        )
-
-        if not directory.exists():
-            directory.create_directory()
-
-
-def upload_new_file(filesystem, path, data):
-    """
-    Create, append, flush and verify.
-
-    Never automatically overwrite an
-    existing file.
-    """
-
-    ensure_directories(
-        filesystem,
-        path
-    )
-
-    remote = filesystem.get_file_client(
-        path
-    )
-
-    if remote.exists():
-        existing = (
-            remote.download_file().readall()
-        )
-
-        if sha256(existing) == sha256(data):
-            print(
-                "Identical file already exists. "
-                "Upload skipped."
-            )
-            return
-
-        raise FileExistsError(
-            "Destination already exists "
-            "with different content."
-        )
-
-    remote.create_file()
-
-    offset = 0
-
-    for position in range(
-        0,
-        len(data),
-        CHUNK_SIZE
-    ):
-        chunk = data[
-            position:position + CHUNK_SIZE
-        ]
-
-        remote.append_data(
-            data=chunk,
-            offset=offset,
-            length=len(chunk)
-        )
-
-        offset += len(chunk)
-
-    remote.flush_data(offset)
-
-    uploaded = (
-        remote.download_file().readall()
-    )
-
-    if sha256(uploaded) != sha256(data):
-        raise ValueError(
-            "Azure checksum verification failed."
-        )
-
-    print(
-        f"Upload verified: {len(data)} bytes"
-    )
-
 
 def process_azure_file(
     filesystem,
@@ -587,11 +871,25 @@ def main():
             "EIA_END_HOUR must end at 23."
         )
 
-    start_date = calculate_start_date()
+    # Azure connection is established before
+    # calculating the start date because ADLS
+    # is now the checkpoint source of truth.
+    filesystem = create_filesystem()
+
+    initialize_cloud_watermark(
+        filesystem
+    )
+
+    start_date = calculate_start_date(
+        filesystem
+    )
+
     end_date = end_hour.date()
 
     print("=" * 55)
     print("EIA TO ADLS INCREMENTAL PIPELINE")
+    print("Checkpoint source: ADLS Gen2")
+    print(f"Cloud state: {CLOUD_STATE_PATH}")
     print(f"Start date: {start_date}")
     print(f"End date:   {end_date}")
     print("=" * 55)
@@ -600,7 +898,6 @@ def main():
         print("Nothing to process.")
         return
 
-    filesystem = create_filesystem()
     session = create_session()
 
     current_day = start_date
@@ -677,15 +974,15 @@ def main():
                 f"Storage result: {result}"
             )
 
-            # 6. Advance checkpoint only
-            # after successful verification.
-            save_watermark(
+            # 6. Advance cloud checkpoint only
+            # after successful raw storage processing.
+            watermark = save_watermark(
+                filesystem,
                 current_day
             )
 
             print(
-                "Watermark:",
-                load_watermark()
+                f"Cloud watermark: {watermark}"
             )
 
             current_day += timedelta(
