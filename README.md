@@ -1299,7 +1299,9 @@ The supporting exported datasets are stored at:
 - [`dashboard/data/eia_daily_gold.csv`](dashboard/data/eia_daily_gold.csv)
 - [`dashboard/data/eia_hourly_silver.csv`](dashboard/data/eia_hourly_silver.csv)
 
-**Validation note:** The dashboard KPI formulas have been reviewed. A complete record-by-record reconciliation against the exported CSV files is still pending and should be completed before describing the snapshot as independently verified.
+Validation Note: The dashboard's embedded hourly and daily datasets were reconciled against the exported CSV files using an automated Python validation script. All 522 out of 522 checks passed, covering record counts, hourly actual and forecast values, daily KPIs, and energy consistency across the 3-day, 7-day, and 10-day filters.
+
+The data reconciliation is complete. Visual chart rendering and interactive browser functionality remain subject to separate testing.
 
 ---
 
