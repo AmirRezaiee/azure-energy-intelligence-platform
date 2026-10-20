@@ -1,0 +1,67 @@
+{
+  "name": "US Electricity Intelligence | Dark Navy",
+  "dataColors": [
+    "#16B8D5",
+    "#F59E0B",
+    "#248CB4",
+    "#5FCEAA",
+    "#A78BFA",
+    "#F87171",
+    "#EAB308",
+    "#67E8F9"
+  ],
+  "background": "#0B1220",
+  "foreground": "#E8F0FA",
+  "tableAccent": "#16B8D5",
+  "good": "#5FCEAA",
+  "neutral": "#F59E0B",
+  "bad": "#F87171",
+  "textClasses": {
+    "title": {
+      "fontFace": "Segoe UI Semibold",
+      "fontSize": 16,
+      "color": "#E8F0FA"
+    },
+    "label": {
+      "fontFace": "Segoe UI",
+      "fontSize": 11,
+      "color": "#E8F0FA"
+    },
+    "callout": {
+      "fontFace": "Segoe UI Semibold",
+      "fontSize": 30,
+      "color": "#E8F0FA"
+    }
+  },
+  "visualStyles": {
+    "*": {
+      "*": {
+        "background": [
+          {
+            "color": {
+              "solid": {
+                "color": "#142238"
+              }
+            },
+            "transparency": 0
+          }
+        ],
+        "title": [
+          {
+            "show": true,
+            "fontColor": {
+              "solid": {
+                "color": "#E8F0FA"
+              }
+            },
+            "background": {
+              "solid": {
+                "color": "#142238"
+              }
+            }
+          }
+        ]
+      }
+    }
+  }
+}
